@@ -1,46 +1,29 @@
 {
   "name": "raw2",
   "version": "1.0.0",
-  "description": "",
+  "description": "A simple Electron OAuth application",
   "main": "dist/main/main.js",
   "scripts": {
-    "build": "tsc && node scripts/build.js",
-    "build:ts": "tsc",
-    "build:static": "node scripts/build.js",
-    "build:watch": "tsc --watch",
-    "start": "electron .",
-    "dev": "concurrently \"npm run build:watch\" \"wait-on dist/main/main.js && electron .\"",
-    "clean": "rimraf dist",
-    "test": "echo \"暂无测试\" && exit 0"
+    "build": "./scripts/build.sh",
+    "build:quick": "tsc && cp src/renderer/index.html dist/renderer/",
+    "copy-static": "cp src/renderer/index.html dist/renderer/ && echo '✅ Static files copied'",
+    "start": "npm run build && electron .",
+    "dev": "npm run build:quick && electron .",
+    "clean": "rm -rf dist"
   },
-  "keywords": [],
-  "author": "",
+  "keywords": ["electron", "oauth", "github"],
+  "author": "Your Name",
   "license": "MIT",
-  "type": "commonjs",
   "devDependencies": {
-    "@types/dotenv": "^6.1.1",
-    "@types/node": "^24.0.4",
-    "@types/node-fetch": "^2.6.12",
-    "@types/react": "^19.1.8",
-    "@types/react-dom": "^19.1.6",
-    "@typescript-eslint/eslint-plugin": "^8.35.0",
-    "@typescript-eslint/parser": "^8.35.0",
-    "autoprefixer": "^10.4.21",
-    "concurrently": "^9.2.0",
-    "electron": "^37.1.0",
-    "electron-builder": "^26.0.12",
-    "eslint": "^9.29.0",
-    "postcss": "^8.5.6",
-    "rimraf": "^6.0.1",
-    "tailwindcss": "^4.1.11",
-    "typescript": "^5.8.3",
-    "wait-on": "^8.0.3"
+    "@types/node": "^18.0.0",
+    "electron": "^25.0.0",
+    "typescript": "^5.0.0"
   },
   "dependencies": {
-    "dotenv": "^16.6.0",
-    "keytar": "^7.9.0",
-    "node-fetch": "^2.7.0",
-    "react": "^19.1.0",
-    "react-dom": "^19.1.0"
+    "dotenv": "^16.0.0",
+    "keytar": "^7.9.0"
+  },
+  "engines": {
+    "node": ">=16.0.0"
   }
 }

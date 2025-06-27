@@ -10,8 +10,6 @@ interface UserInfo {
   email: string | null;
   avatar_url: string;
   public_repos: number;
-  followers?: number;
-  following?: number;
 }
 
 // 定义系统信息类型
@@ -33,7 +31,6 @@ interface OAuthLoginResult {
   success: boolean;
   error?: string;
   user?: UserInfo;
-  token?: TokenInfo;
 }
 
 interface OAuthLogoutResult {
@@ -81,10 +78,7 @@ interface ElectronAPI {
     login(): Promise<OAuthLoginResult>;
     logout(): Promise<OAuthLogoutResult>;
     getStatus(): Promise<OAuthStatusResult>;
-    refreshUser(): Promise<OAuthRefreshResult>;
-    getToken(): Promise<string | null>;
     manualRefresh(): Promise<OAuthRefreshResult>;
-    getSessionStatus(): Promise<SessionStatus>;
   };
 
   // 事件监听 API
@@ -126,20 +120,8 @@ const electronAPI: ElectronAPI = {
       return ipcRenderer.invoke('oauth:get-status');
     },
     
-    refreshUser: () => {
-      return ipcRenderer.invoke('oauth:refresh-user');
-    },
-    
-    getToken: () => {
-      return ipcRenderer.invoke('oauth:get-token');
-    },
-    
     manualRefresh: () => {
       return ipcRenderer.invoke('oauth:manual-refresh');
-    },
-    
-    getSessionStatus: () => {
-      return ipcRenderer.invoke('oauth:get-session-status');
     }
   },
 
