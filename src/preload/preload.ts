@@ -4,9 +4,14 @@ import { contextBridge, ipcRenderer } from 'electron';
 
 // 定义用户信息类型
 interface UserInfo {
-  id: string;
-  name: string;
-  email: string;
+  id: number;
+  login: string;
+  name: string | null;
+  email: string | null;
+  avatar_url: string;
+  public_repos: number;
+  followers?: number;
+  following?: number;
 }
 
 // 定义系统信息类型
@@ -28,16 +33,40 @@ interface OAuthLoginResult {
   success: boolean;
   error?: string;
   user?: UserInfo;
-  tokens?: TokenInfo;
+  token?: TokenInfo;
 }
 
 interface OAuthLogoutResult {
   success: boolean;
+  error?: string;
 }
 
 interface OAuthStatusResult {
   isLoggedIn: boolean;
   user?: UserInfo;
+  error?: string;
+}
+
+interface OAuthRefreshResult {
+  success: boolean;
+  user?: UserInfo;
+  error?: string;
+}
+
+// 定义会话状态类型
+interface SessionStatus {
+  isLoggedIn: boolean;
+  lastValidated: number | null;
+  timeSinceLastValidation: number | null;
+  isRefreshing: boolean;
+  retryCount: number;
+  error?: string;
+}
+
+// 定义会话状态变化事件
+interface SessionStatusChangeEvent {
+  isLoggedIn: boolean;
+  user: UserInfo | null;
 }
 
 // 定义暴露给渲染进程的 API 接口
@@ -52,7 +81,14 @@ interface ElectronAPI {
     login(): Promise<OAuthLoginResult>;
     logout(): Promise<OAuthLogoutResult>;
     getStatus(): Promise<OAuthStatusResult>;
+    refreshUser(): Promise<OAuthRefreshResult>;
+    getToken(): Promise<string | null>;
+    manualRefresh(): Promise<OAuthRefreshResult>;
+    getSessionStatus(): Promise<SessionStatus>;
   };
+
+  // 事件监听 API
+  onSessionStatusChange(callback: (event: SessionStatusChangeEvent) => void): () => void;
 }
 
 // 实现 API
@@ -88,7 +124,37 @@ const electronAPI: ElectronAPI = {
     
     getStatus: () => {
       return ipcRenderer.invoke('oauth:get-status');
+    },
+    
+    refreshUser: () => {
+      return ipcRenderer.invoke('oauth:refresh-user');
+    },
+    
+    getToken: () => {
+      return ipcRenderer.invoke('oauth:get-token');
+    },
+    
+    manualRefresh: () => {
+      return ipcRenderer.invoke('oauth:manual-refresh');
+    },
+    
+    getSessionStatus: () => {
+      return ipcRenderer.invoke('oauth:get-session-status');
     }
+  },
+
+  // 事件监听 API
+  onSessionStatusChange: (callback: (event: SessionStatusChangeEvent) => void) => {
+    const eventHandler = (_event: any, data: SessionStatusChangeEvent) => {
+      callback(data);
+    };
+    
+    ipcRenderer.on('session:status-changed', eventHandler);
+    
+    // 返回清理函数
+    return () => {
+      ipcRenderer.removeListener('session:status-changed', eventHandler);
+    };
   }
 };
 

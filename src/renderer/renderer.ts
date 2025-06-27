@@ -2,115 +2,200 @@
 
 // 定义用户信息类型（与预加载脚本保持一致）
 interface UserInfo {
-  id: string;
-  name: string;
-  email: string;
+  id: number;
+  login: string;
+  name: string | null;
+  email: string | null;
+  avatar_url: string;
+  public_repos: number;
+  followers?: number;
+  following?: number;
 }
 
-class RendererApp {
-  private testButton!: HTMLButtonElement;
-  private versionButton!: HTMLButtonElement;
-  private testStatus!: HTMLDivElement;
-  
-  // OAuth 相关元素
+// 定义会话状态类型（与预加载脚本保持一致）
+interface SessionStatus {
+  isLoggedIn: boolean;
+  lastValidated: number | null;
+  timeSinceLastValidation: number | null;
+  isRefreshing: boolean;
+  retryCount: number;
+  error?: string;
+}
+
+class GitHubOAuthApp {
   private loginButton!: HTMLButtonElement;
   private logoutButton!: HTMLButtonElement;
-  private loginStatus!: HTMLDivElement;
-  private userInfo!: HTMLDivElement;
-  private authStatus!: HTMLDivElement;
+  private refreshButton!: HTMLButtonElement;
+  private loadingSection!: HTMLDivElement;
+  private loginSection!: HTMLDivElement;
+  private userSection!: HTMLDivElement;
+  private statusMessage!: HTMLDivElement;
+
+  // 用户信息元素
+  private userAvatar!: HTMLImageElement;
+  private userName!: HTMLDivElement;
+  private userLogin!: HTMLDivElement;
+  private userRepos!: HTMLSpanElement;
+  private userFollowers!: HTMLSpanElement;
+  private userFollowing!: HTMLSpanElement;
+
+  // 会话状态相关
+  private sessionStatusCleanup: (() => void) | null = null;
+  private sessionStatusTimer: NodeJS.Timeout | null = null;
 
   constructor() {
     this.initializeElements();
     this.setupEventListeners();
-    this.loadAppInfo();
-    this.checkLoginStatus();
+    this.setupSessionStatusListener();
+    this.checkInitialLoginStatus();
+    this.startSessionStatusMonitor();
   }
 
   private initializeElements(): void {
-    // 原有元素
-    this.testButton = this.getElement('test-button') as HTMLButtonElement;
-    this.versionButton = this.getElement('version-button') as HTMLButtonElement;
-    this.testStatus = this.getElement('test-status') as HTMLDivElement;
-    
-    // OAuth 相关元素
+    // 获取主要控制元素
     this.loginButton = this.getElement('login-button') as HTMLButtonElement;
     this.logoutButton = this.getElement('logout-button') as HTMLButtonElement;
-    this.loginStatus = this.getElement('login-status') as HTMLDivElement;
-    this.userInfo = this.getElement('user-info') as HTMLDivElement;
-    this.authStatus = this.getElement('auth-status') as HTMLDivElement;
+    this.loadingSection = this.getElement('loading-section') as HTMLDivElement;
+    this.loginSection = this.getElement('login-section') as HTMLDivElement;
+    this.userSection = this.getElement('user-section') as HTMLDivElement;
+    this.statusMessage = this.getElement('status-message') as HTMLDivElement;
+
+    // 获取用户信息显示元素
+    this.userAvatar = this.getElement('user-avatar') as HTMLImageElement;
+    this.userName = this.getElement('user-name') as HTMLDivElement;
+    this.userLogin = this.getElement('user-login') as HTMLDivElement;
+    this.userRepos = this.getElement('user-repos') as HTMLSpanElement;
+    this.userFollowers = this.getElement('user-followers') as HTMLSpanElement;
+    this.userFollowing = this.getElement('user-following') as HTMLSpanElement;
+
+    // 尝试获取刷新按钮（可能不存在）
+    try {
+      this.refreshButton = this.getElement('refresh-button') as HTMLButtonElement;
+    } catch {
+      // 如果没有刷新按钮，我们创建一个
+      this.createRefreshButton();
+    }
+  }
+
+  private createRefreshButton(): void {
+    // 创建刷新按钮并添加到用户界面
+    this.refreshButton = document.createElement('button');
+    this.refreshButton.id = 'refresh-button';
+    this.refreshButton.className = 'refresh-button';
+    this.refreshButton.innerHTML = '🔄 刷新';
+    this.refreshButton.title = '手动刷新用户信息';
+    
+    // 添加到退出按钮之前
+    const logoutButton = this.getElement('logout-button');
+    logoutButton.parentNode?.insertBefore(this.refreshButton, logoutButton);
   }
 
   private getElement(id: string): HTMLElement {
     const element = document.getElementById(id);
     if (!element) {
-      throw new Error(`无法找到 ID 为 "${id}" 的元素`);
+      throw new Error(`元素未找到: ${id}`);
     }
     return element;
   }
 
   private setupEventListeners(): void {
-    // 原有事件监听器
-    this.testButton.addEventListener('click', () => {
-      this.testIPC();
-    });
+    this.loginButton.addEventListener('click', () => this.handleLogin());
+    this.logoutButton.addEventListener('click', () => this.handleLogout());
+    this.refreshButton.addEventListener('click', () => this.handleManualRefresh());
+  }
 
-    this.versionButton.addEventListener('click', () => {
-      this.getVersionInfo();
-    });
-    
-    // OAuth 事件监听器
-    this.loginButton.addEventListener('click', () => {
-      this.handleLogin();
-    });
-    
-    this.logoutButton.addEventListener('click', () => {
-      this.handleLogout();
+  /**
+   * 设置会话状态变化监听器
+   */
+  private setupSessionStatusListener(): void {
+    if (!window.electronAPI?.onSessionStatusChange) {
+      console.warn('⚠️ 会话状态监听器不可用');
+      return;
+    }
+
+    this.sessionStatusCleanup = window.electronAPI.onSessionStatusChange((event) => {
+      console.log('📡 收到会话状态变化:', event);
+      
+      if (event.isLoggedIn && event.user) {
+        this.showStatus('会话已自动刷新', 'success');
+        this.showUserInterface(event.user);
+      } else {
+        this.showStatus('会话已过期，请重新登录', 'error');
+        this.showLoginInterface();
+      }
     });
   }
 
-  private async loadAppInfo(): Promise<void> {
+  /**
+   * 启动会话状态监控
+   */
+  private startSessionStatusMonitor(): void {
+    // 每30秒检查一次会话状态
+    this.sessionStatusTimer = setInterval(async () => {
+      try {
+        await this.checkSessionHealth();
+      } catch (error) {
+        console.warn('⚠️ 会话健康检查失败:', error);
+      }
+    }, 30000); // 30秒
+  }
+
+  /**
+   * 检查会话健康状态
+   */
+  private async checkSessionHealth(): Promise<void> {
+    if (!window.electronAPI?.oauth?.getSessionStatus) {
+      return;
+    }
+
     try {
-      // 显示基础应用信息
-      this.updateElement('app-name', 'Electron OAuth App');
+      const status = await window.electronAPI.oauth.getSessionStatus();
       
-      // 获取系统信息
-      if (window.electronAPI) {
-        const systemInfo = window.electronAPI.getSystemInfo();
-        this.updateElement('electron-version', systemInfo.electron);
-        this.updateElement('node-version', systemInfo.node);
-        
-        // 尝试获取应用版本
-        try {
-          const version = await window.electronAPI.getVersion();
-          this.updateElement('app-version', version);
-        } catch (error) {
-          this.updateElement('app-version', '获取失败');
-          console.warn('获取应用版本失败:', error);
+      if (status.isLoggedIn) {
+        // 检查是否需要显示刷新状态
+        if (status.isRefreshing) {
+          this.showRefreshingStatus();
         }
-      } else {
-        this.updateElement('electron-version', '未知');
-        this.updateElement('node-version', '未知');
-        this.updateElement('app-version', 'API 未就绪');
+
+        // 检查重试次数
+        if (status.retryCount > 0) {
+          this.showStatus(`连接不稳定，正在重试 (${status.retryCount}/3)`, 'info');
+        }
+
+        // 检查最后验证时间
+        if (status.timeSinceLastValidation && status.timeSinceLastValidation > 2 * 60 * 60 * 1000) {
+          console.log('⚠️ 会话验证时间过久，建议刷新');
+        }
       }
     } catch (error) {
-      console.error('加载应用信息失败:', error);
-      // 设置默认值
-      this.updateElement('electron-version', '获取失败');
-      this.updateElement('node-version', '获取失败');
-      this.updateElement('app-version', '获取失败');
+      console.error('❌ 检查会话健康状态失败:', error);
     }
   }
 
-  private async checkLoginStatus(): Promise<void> {
+  private async checkInitialLoginStatus(): Promise<void> {
     try {
       if (!window.electronAPI?.oauth) {
+        this.showStatus('OAuth API 未就绪', 'error');
+        this.showLoginInterface();
         return;
       }
 
+      console.log('🔍 检查初始登录状态...');
+      this.showLoadingInterface();
+      
       const status = await window.electronAPI.oauth.getStatus();
-      this.updateLoginUI(status.isLoggedIn, status.user);
+      
+      if (status.isLoggedIn && status.user) {
+        console.log('✅ 发现有效的登录会话');
+        this.showUserInterface(status.user);
+      } else {
+        console.log('📭 未发现登录会话');
+        this.showLoginInterface();
+      }
     } catch (error) {
       console.error('检查登录状态失败:', error);
+      this.showStatus('检查登录状态失败', 'error');
+      this.showLoginInterface();
     }
   }
 
@@ -120,27 +205,27 @@ class RendererApp {
         throw new Error('OAuth API 未就绪');
       }
 
-      this.showLoginStatus('正在登录...', 'info');
-      this.loginButton.disabled = true;
+      // 显示加载状态
+      this.setLoginButtonLoading(true);
+      this.showStatus('正在跳转到 GitHub 授权页面...', 'info');
 
-      console.log('🔐 开始 OAuth 登录流程');
+      console.log('🔐 开始 GitHub OAuth 登录流程');
       
       const result = await window.electronAPI.oauth.login();
       
       if (result.success && result.user) {
-        this.showLoginStatus('登录成功！', 'success');
-        this.updateLoginUI(true, result.user);
         console.log('✅ 登录成功');
+        this.showStatus('登录成功！会话将自动维护', 'success');
+        this.showUserInterface(result.user);
       } else {
         throw new Error(result.error || '登录失败');
       }
       
     } catch (error) {
       console.error('❌ 登录失败:', error);
-      this.showLoginStatus(`登录失败: ${(error as Error).message}`, 'error');
-      this.updateLoginUI(false);
+      this.showStatus(`登录失败: ${(error as Error).message}`, 'error');
     } finally {
-      this.loginButton.disabled = false;
+      this.setLoginButtonLoading(false);
     }
   }
 
@@ -150,206 +235,207 @@ class RendererApp {
         throw new Error('OAuth API 未就绪');
       }
 
-      this.showLoginStatus('正在退出登录...', 'info');
-      this.logoutButton.disabled = true;
+      this.setLogoutButtonLoading(true);
+      this.showStatus('正在退出登录...', 'info');
 
       console.log('🚪 开始退出登录流程');
       
       const result = await window.electronAPI.oauth.logout();
       
       if (result.success) {
-        this.showLoginStatus('已退出登录', 'info');
-        this.updateLoginUI(false);
         console.log('✅ 退出登录成功');
+        this.showStatus('已成功退出登录', 'success');
+        this.showLoginInterface();
       } else {
-        throw new Error('退出登录失败');
+        throw new Error(result.error || '退出登录失败');
       }
       
     } catch (error) {
       console.error('❌ 退出登录失败:', error);
-      this.showLoginStatus(`退出失败: ${(error as Error).message}`, 'error');
+      this.showStatus(`退出登录失败: ${(error as Error).message}`, 'error');
     } finally {
-      this.logoutButton.disabled = false;
+      this.setLogoutButtonLoading(false);
     }
   }
 
-  private updateLoginUI(isLoggedIn: boolean, user?: UserInfo): void {
-    if (isLoggedIn && user) {
-      // 显示已登录状态
-      this.loginButton.style.display = 'none';
-      this.logoutButton.style.display = 'inline-block';
-      this.userInfo.style.display = 'block';
-      
-      // 更新基本用户信息
-      this.updateElement('user-name', user.name);
-      this.updateElement('user-email', user.email || '未公开');
-      this.updateElement('user-id', user.id);
-      
-      // 更新扩展用户信息（如果有的话）
-      if ('login' in user) {
-        this.updateElement('user-login', (user as any).login);
-      }
-      if ('publicRepos' in user) {
-        this.updateElement('user-repos', (user as any).publicRepos?.toString() || '0');
-      }
-      if ('followers' in user) {
-        this.updateElement('user-followers', (user as any).followers?.toString() || '0');
-      }
-      if ('following' in user) {
-        this.updateElement('user-following', (user as any).following?.toString() || '0');
-      }
-      if ('createdAt' in user) {
-        const createdDate = new Date((user as any).createdAt);
-        this.updateElement('user-created', createdDate.toLocaleDateString('zh-CN'));
-      }
-      
-      // 显示头像
-      if ('avatar' in user && (user as any).avatar) {
-        const avatarImg = document.getElementById('user-avatar') as HTMLImageElement;
-        if (avatarImg) {
-          avatarImg.src = (user as any).avatar;
-          avatarImg.style.display = 'block';
-        }
-      }
-      
-      // 显示个人简介
-      if ('bio' in user && (user as any).bio) {
-        const bioElement = document.getElementById('user-bio');
-        if (bioElement) {
-          bioElement.textContent = (user as any).bio;
-          bioElement.style.display = 'block';
-        }
-      }
-      
-      // 更新认证状态
-      this.authStatus.innerHTML = `
-        <div class="status success">
-          <p><strong>已登录</strong></p>
-          <p>欢迎回来，${user.name}！</p>
-          <p style="font-size: 12px; margin-top: 10px;">已获取 GitHub 访问令牌，可以调用 API</p>
-        </div>
-      `;
-      
-    } else {
-      // 显示未登录状态
-      this.loginButton.style.display = 'inline-block';
-      this.logoutButton.style.display = 'none';
-      this.userInfo.style.display = 'none';
-      
-      // 重置认证状态
-      this.authStatus.innerHTML = '<div class="placeholder">请先登录以查看详细状态...</div>';
-    }
-  }
-
-  private showLoginStatus(message: string, type: 'info' | 'success' | 'error'): void {
-    this.loginStatus.textContent = message;
-    this.loginStatus.className = `status ${type}`;
-    this.loginStatus.style.display = 'block';
-
-    // 3秒后自动隐藏成功/错误消息
-    if (type !== 'info') {
-      setTimeout(() => {
-        this.loginStatus.style.display = 'none';
-      }, 3000);
-    }
-  }
-
-  private async testIPC(): Promise<void> {
+  /**
+   * 处理手动刷新
+   */
+  private async handleManualRefresh(): Promise<void> {
     try {
-      this.showStatus('正在测试 IPC 通信...', 'info');
-      this.testButton.disabled = true;
-
-      if (!window.electronAPI) {
-        throw new Error('Electron API 未就绪');
+      if (!window.electronAPI?.oauth) {
+        throw new Error('OAuth API 未就绪');
       }
 
-      // 测试发送消息给主进程
-      window.electronAPI.showMessage('来自渲染进程的测试消息');
+      this.setRefreshButtonLoading(true);
+      this.showStatus('正在刷新用户信息...', 'info');
+
+      console.log('🔄 开始手动刷新用户信息');
       
-      this.showStatus('IPC 通信测试成功！', 'success');
-    } catch (error) {
-      console.error('IPC 测试失败:', error);
-      this.showStatus(`IPC 通信测试失败: ${(error as Error).message}`, 'error');
-    } finally {
-      this.testButton.disabled = false;
-    }
-  }
-
-  private async getVersionInfo(): Promise<void> {
-    try {
-      this.showStatus('正在获取版本信息...', 'info');
-      this.versionButton.disabled = true;
-
-      if (!window.electronAPI) {
-        throw new Error('Electron API 未就绪');
+      const result = await window.electronAPI.oauth.manualRefresh();
+      
+      if (result.success && result.user) {
+        console.log('✅ 手动刷新成功');
+        this.showStatus('用户信息已刷新', 'success');
+        this.updateUserInfo(result.user);
+      } else {
+        throw new Error(result.error || '刷新失败');
       }
-
-      const version = await window.electronAPI.getVersion();
-      this.updateElement('app-version', version);
-      this.showStatus('版本信息获取成功！', 'success');
+      
     } catch (error) {
-      console.error('获取版本信息失败:', error);
-      this.showStatus(`获取版本信息失败: ${(error as Error).message}`, 'error');
+      console.error('❌ 手动刷新失败:', error);
+      this.showStatus(`刷新失败: ${(error as Error).message}`, 'error');
+      
+      // 如果刷新失败，可能是会话过期了，跳转到登录页面
+      if ((error as Error).message.includes('过期') || (error as Error).message.includes('expired')) {
+        setTimeout(() => this.showLoginInterface(), 2000);
+      }
     } finally {
-      this.versionButton.disabled = false;
+      this.setRefreshButtonLoading(false);
     }
   }
 
-  private updateElement(id: string, text: string): void {
-    const element = document.getElementById(id);
-    if (element) {
-      element.textContent = text;
-    } else {
-      console.warn(`元素 ${id} 不存在`);
+  private showLoadingInterface(): void {
+    this.loadingSection.classList.remove('hidden');
+    this.loginSection.classList.remove('visible');
+    this.userSection.classList.remove('visible');
+    this.hideStatus();
+  }
+
+  private showLoginInterface(): void {
+    this.loadingSection.classList.add('hidden');
+    this.loginSection.classList.add('visible');
+    this.userSection.classList.remove('visible');
+    this.hideStatus();
+  }
+
+  private showUserInterface(user: UserInfo): void {
+    // 隐藏加载和登录界面，显示用户界面
+    this.loadingSection.classList.add('hidden');
+    this.loginSection.classList.remove('visible');
+    this.userSection.classList.add('visible');
+
+    // 更新用户信息
+    this.updateUserInfo(user);
+    
+    // 隐藏状态消息
+    setTimeout(() => this.hideStatus(), 3000);
+  }
+
+  private showRefreshingStatus(): void {
+    if (this.userSection.classList.contains('visible')) {
+      this.showStatus('正在后台刷新会话...', 'info');
     }
+  }
+
+  private updateUserInfo(user: UserInfo): void {
+    // 更新头像
+    this.userAvatar.src = user.avatar_url;
+    this.userAvatar.alt = `${user.login}的头像`;
+
+    // 更新基本信息
+    this.userName.textContent = user.name || user.login;
+    this.userLogin.textContent = `@${user.login}`;
+
+    // 更新统计信息
+    this.userRepos.textContent = user.public_repos.toString();
+    this.userFollowers.textContent = (user.followers || 0).toString();
+    this.userFollowing.textContent = (user.following || 0).toString();
+
+    console.log('👤 用户信息已更新:', {
+      login: user.login,
+      name: user.name,
+      repos: user.public_repos,
+      followers: user.followers,
+      following: user.following
+    });
   }
 
   private showStatus(message: string, type: 'info' | 'success' | 'error'): void {
-    this.testStatus.textContent = message;
-    this.testStatus.className = `status ${type}`;
-    this.testStatus.style.display = 'block';
+    this.statusMessage.textContent = message;
+    this.statusMessage.className = `status-message ${type} visible`;
 
-    // 3秒后自动隐藏成功/错误消息
+    // 自动隐藏成功和错误消息
     if (type !== 'info') {
-      setTimeout(() => {
-        this.testStatus.style.display = 'none';
-      }, 3000);
+      setTimeout(() => this.hideStatus(), 4000);
+    }
+  }
+
+  private hideStatus(): void {
+    this.statusMessage.classList.remove('visible');
+  }
+
+  private setLoginButtonLoading(loading: boolean): void {
+    if (loading) {
+      this.loginButton.disabled = true;
+      this.loginButton.innerHTML = `
+        <div class="loading"></div>
+        登录中...
+      `;
+    } else {
+      this.loginButton.disabled = false;
+      this.loginButton.innerHTML = `
+        <svg class="github-icon" viewBox="0 0 16 16">
+          <path d="M8 0C3.58 0 0 3.58 0 8c0 3.54 2.29 6.53 5.47 7.59.4.07.55-.17.55-.38 0-.19-.01-.82-.01-1.49-2.01.37-2.53-.49-2.69-.94-.09-.23-.48-.94-.82-1.13-.28-.15-.68-.52-.01-.53.63-.01 1.08.58 1.23.82.72 1.21 1.87.87 2.33.66.07-.52.28-.87.51-1.07-1.78-.2-3.64-.89-3.64-3.95 0-.87.31-1.59.82-2.15-.08-.2-.36-1.02.08-2.12 0 0 .67-.21 2.2.82.64-.18 1.32-.27 2-.27.68 0 1.36.09 2 .27 1.53-1.04 2.2-.82 2.2-.82.44 1.1.16 1.92.08 2.12.51.56.82 1.27.82 2.15 0 3.07-1.87 3.75-3.65 3.95.29.25.54.73.54 1.48 0 1.07-.01 1.93-.01 2.2 0 .21.15.46.55.38A8.013 8.013 0 0016 8c0-4.42-3.58-8-8-8z"/>
+        </svg>
+        使用 GitHub 登录
+      `;
+    }
+  }
+
+  private setLogoutButtonLoading(loading: boolean): void {
+    if (loading) {
+      this.logoutButton.disabled = true;
+      this.logoutButton.textContent = '退出中...';
+    } else {
+      this.logoutButton.disabled = false;
+      this.logoutButton.textContent = '退出登录';
+    }
+  }
+
+  private setRefreshButtonLoading(loading: boolean): void {
+    if (loading) {
+      this.refreshButton.disabled = true;
+      this.refreshButton.innerHTML = '🔄 刷新中...';
+    } else {
+      this.refreshButton.disabled = false;
+      this.refreshButton.innerHTML = '🔄 刷新';
+    }
+  }
+
+  /**
+   * 清理资源
+   */
+  public destroy(): void {
+    console.log('🧹 清理 GitHubOAuthApp 资源...');
+    
+    // 清理会话状态监听器
+    if (this.sessionStatusCleanup) {
+      this.sessionStatusCleanup();
+      this.sessionStatusCleanup = null;
+    }
+    
+    // 清理定时器
+    if (this.sessionStatusTimer) {
+      clearInterval(this.sessionStatusTimer);
+      this.sessionStatusTimer = null;
     }
   }
 }
 
-// 当 DOM 加载完成时初始化应用
+// 全局应用实例
+let appInstance: GitHubOAuthApp | null = null;
+
+// 当页面加载完成后初始化应用
 document.addEventListener('DOMContentLoaded', () => {
-  try {
-    // 检查 electronAPI 是否可用
-    if (!window.electronAPI) {
-      throw new Error('Electron API 未就绪，请检查 preload 脚本配置');
-    }
-    
-    new RendererApp();
-  } catch (error) {
-    console.error('初始化渲染进程应用失败:', error);
-    
-    // 显示错误信息给用户
-    const errorDiv = document.createElement('div');
-    errorDiv.className = 'status error';
-    errorDiv.style.position = 'fixed';
-    errorDiv.style.top = '20px';
-    errorDiv.style.right = '20px';
-    errorDiv.style.maxWidth = '400px';
-    errorDiv.style.zIndex = '9999';
-    errorDiv.innerHTML = `
-      <strong>应用初始化失败</strong><br>
-      ${(error as Error).message}<br>
-      <small>请检查控制台获取详细信息</small>
-    `;
-    document.body.appendChild(errorDiv);
-    
-    // 5秒后自动隐藏错误信息
-    setTimeout(() => {
-      if (errorDiv.parentNode) {
-        errorDiv.parentNode.removeChild(errorDiv);
-      }
-    }, 5000);
+  console.log('🚀 GitHub OAuth 应用启动');
+  appInstance = new GitHubOAuthApp();
+});
+
+// 当页面卸载时清理资源
+window.addEventListener('beforeunload', () => {
+  if (appInstance) {
+    appInstance.destroy();
+    appInstance = null;
   }
 });

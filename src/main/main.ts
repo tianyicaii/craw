@@ -4,11 +4,15 @@ import { app, BrowserWindow, ipcMain, shell } from 'electron';
 import * as path from 'path';
 import { loadEnv, printEnvInfo } from '../config/env';
 import { OAuthManager } from '../oauth/OAuthManager';
+import { GitHubAPI } from '../api/GitHubAPI';
+import { UserSessionManager } from '../oauth/UserSessionManager';
 import { getGitHubOAuthConfig, validateGitHubConfig, getGitHubSetupInstructions } from '../config/github';
 
 class ElectronApp {
   private mainWindow: BrowserWindow | null = null;
   private oauthManager: OAuthManager | null = null;
+  private githubAPI: GitHubAPI | null = null;
+  private sessionManager: UserSessionManager | null = null;
 
   constructor() {
     // 首先加载环境变量
@@ -45,6 +49,18 @@ class ElectronApp {
         this.createMainWindow();
       }
     });
+
+    // 应用即将退出时的清理
+    app.on('before-quit', () => {
+      console.log('🧹 应用即将退出，清理资源...');
+      this.cleanup();
+    });
+
+    // Windows/Linux 上应用退出时的清理
+    app.on('will-quit', () => {
+      console.log('🧹 应用退出，最终清理...');
+      this.cleanup();
+    });
   }
 
   private initializeOAuth(): void {
@@ -55,7 +71,13 @@ class ElectronApp {
       validateGitHubConfig(config);
       
       this.oauthManager = new OAuthManager(config);
+      this.githubAPI = new GitHubAPI(config.clientId, config.clientSecret);
+      this.sessionManager = new UserSessionManager(this.githubAPI);
+      
       console.log('✅ OAuth 管理器初始化成功');
+      
+      // 尝试加载已保存的用户会话
+      this.loadSavedSession();
       
     } catch (error) {
       console.error('❌ OAuth 管理器初始化失败:', (error as Error).message);
@@ -63,6 +85,58 @@ class ElectronApp {
       
       // 创建一个 null 的管理器，这样应用仍然可以启动
       this.oauthManager = null;
+      this.githubAPI = null;
+      this.sessionManager = null;
+    }
+  }
+
+  private async loadSavedSession(): Promise<void> {
+    if (!this.sessionManager) return;
+    
+    try {
+      // 设置会话事件回调
+      this.sessionManager.setEventCallbacks({
+        onSessionExpired: () => {
+          console.log('⚠️ 会话已过期');
+          this.notifyRendererSessionChange(false);
+        },
+        onSessionRefreshed: (session) => {
+          console.log('✅ 会话已自动刷新');
+          this.notifyRendererSessionChange(true, session.user);
+        },
+        onSessionError: (error) => {
+          console.warn('⚠️ 会话错误:', error.message);
+        },
+        onAutoLogout: () => {
+          console.log('🚪 自动退出登录');
+          this.notifyRendererSessionChange(false);
+        }
+      });
+      
+      const session = await this.sessionManager.loadSession();
+      if (session) {
+        console.log('🎉 已加载用户会话，启动时跳过立即验证');
+        console.log('👤 用户:', session.user.login, session.user.name);
+        
+        // 不在启动时立即验证，而是让自动维护机制处理
+        // 这避免了网络暂时不可用时会话被错误清理
+      } else {
+        console.log('📭 未找到已保存的用户会话');
+      }
+    } catch (error) {
+      console.error('❌ 加载用户会话失败:', error);
+    }
+  }
+
+  /**
+   * 通知渲染进程会话状态变化
+   */
+  private notifyRendererSessionChange(isLoggedIn: boolean, user?: any): void {
+    if (this.mainWindow && !this.mainWindow.isDestroyed()) {
+      this.mainWindow.webContents.send('session:status-changed', {
+        isLoggedIn,
+        user: user || null
+      });
     }
   }
 
@@ -87,7 +161,7 @@ class ElectronApp {
       console.log('🔐 GitHub OAuth 登录请求 - 开始处理');
       
       try {
-        if (!this.oauthManager) {
+        if (!this.oauthManager || !this.githubAPI || !this.sessionManager) {
           throw new Error('OAuth 管理器未初始化。请检查 .env 文件中的 GitHub OAuth 配置。');
         }
 
@@ -100,19 +174,49 @@ class ElectronApp {
           console.log('📋 授权码:', result.code);
           console.log('🔒 State:', result.state);
           
-          // TODO: 下一步将使用这个授权码换取访问令牌
+          // 使用授权码换取访问令牌
+          console.log('🔄 正在换取访问令牌...');
+          const tokenResponse = await this.githubAPI.exchangeCodeForToken(result.code);
           
-          // 暂时返回模拟的用户数据
-          const mockUser = {
-            id: 'github_user_123',
-            name: 'GitHub 用户',
-            email: 'user@github.com'
-          };
+          if (!tokenResponse.access_token) {
+            throw new Error('未能获取访问令牌');
+          }
+          
+          console.log('✅ 成功获取访问令牌');
+          
+          // 获取用户信息
+          console.log('👤 正在获取用户信息...');
+          const userProfile = await this.githubAPI.getCompleteUserProfile(tokenResponse.access_token);
+          
+          // 创建并保存用户会话
+          const session = UserSessionManager.createSession(userProfile, tokenResponse);
+          await this.sessionManager.saveSession(session);
+          
+          console.log('🎉 完整的用户登录流程成功！');
+          console.log('👤 用户信息:', {
+            id: userProfile.id,
+            login: userProfile.login,
+            name: userProfile.name,
+            email: userProfile.email || userProfile.primaryEmail
+          });
           
           return {
             success: true,
-            user: mockUser,
-            authCode: result.code // 临时返回授权码用于调试
+            user: {
+              id: userProfile.id,
+              login: userProfile.login,
+              name: userProfile.name,
+              email: userProfile.email || userProfile.primaryEmail,
+              avatar_url: userProfile.avatar_url,
+              public_repos: userProfile.public_repos,
+              followers: userProfile.followers,
+              following: userProfile.following
+            },
+            token: {
+              access_token: tokenResponse.access_token,
+              token_type: tokenResponse.token_type,
+              scope: tokenResponse.scope
+            }
           };
           
         } else {
@@ -138,9 +242,10 @@ class ElectronApp {
           this.oauthManager.cancelAuth();
         }
         
-        console.log('🗑️ 清理用户数据...');
-        
-        // TODO: 清理存储的令牌等
+        // 清理用户会话
+        if (this.sessionManager) {
+          await this.sessionManager.clearSession();
+        }
         
         console.log('✅ 退出登录成功！');
         
@@ -148,7 +253,10 @@ class ElectronApp {
         
       } catch (error) {
         console.error('❌ 退出登录失败:', error);
-        return { success: false };
+        return { 
+          success: false,
+          error: (error as Error).message
+        };
       }
     });
 
@@ -156,12 +264,197 @@ class ElectronApp {
     ipcMain.handle('oauth:get-status', async () => {
       console.log('🔍 查询 OAuth 登录状态');
       
-      // TODO: 实现真实的状态检查逻辑
-      // 目前返回未登录状态
-      return {
-        isLoggedIn: false
-      };
-    });
+      try {
+        if (!this.sessionManager) {
+          return {
+            isLoggedIn: false,
+            error: 'Session manager not initialized'
+          };
+        }
+        
+        const currentSession = this.sessionManager.getCurrentSession();
+        if (!currentSession) {
+          return {
+            isLoggedIn: false
+          };
+        }
+        
+        // 不在状态查询时进行验证，避免频繁的网络调用
+        // 验证由自动维护机制处理
+        const user = this.sessionManager.getCurrentUser();
+        return {
+          isLoggedIn: true,
+          user: {
+            id: user?.id,
+            login: user?.login,
+            name: user?.name,
+            email: user?.email || user?.primaryEmail,
+            avatar_url: user?.avatar_url,
+            public_repos: user?.public_repos
+          }
+        };
+        
+      } catch (error) {
+                 console.error('❌ 查询登录状态失败:', error);
+         return {
+           isLoggedIn: false,
+           error: (error as Error).message
+         };
+       }
+     });
+
+     // 刷新用户信息处理器
+     ipcMain.handle('oauth:refresh-user', async () => {
+       console.log('🔄 刷新用户信息请求');
+       
+       try {
+         if (!this.sessionManager) {
+           throw new Error('Session manager not initialized');
+         }
+         
+         const updatedSession = await this.sessionManager.refreshUserInfo();
+         
+         if (updatedSession) {
+           const user = updatedSession.user;
+           console.log('✅ 用户信息刷新成功');
+           
+           return {
+             success: true,
+             user: {
+               id: user.id,
+               login: user.login,
+               name: user.name,
+               email: user.email || user.primaryEmail,
+               avatar_url: user.avatar_url,
+               public_repos: user.public_repos,
+               followers: user.followers,
+               following: user.following
+             }
+           };
+         } else {
+           throw new Error('No active session to refresh');
+         }
+         
+       } catch (error) {
+         console.error('❌ 刷新用户信息失败:', error);
+         return {
+           success: false,
+           error: (error as Error).message
+         };
+       }
+     });
+
+     // 获取当前访问令牌处理器（用于 API 调用）
+     ipcMain.handle('oauth:get-token', async () => {
+       try {
+         if (!this.sessionManager) {
+           return null;
+         }
+         
+         const token = this.sessionManager.getCurrentToken();
+         if (token) {
+           // 验证令牌是否仍然有效
+           const isValid = await this.sessionManager.validateSession();
+           if (isValid) {
+             return token;
+           }
+         }
+         
+         return null;
+         
+       } catch (error) {
+         console.error('❌ 获取访问令牌失败:', error);
+         return null;
+       }
+     });
+
+     // 手动刷新会话处理器
+     ipcMain.handle('oauth:manual-refresh', async () => {
+       console.log('🔄 手动刷新会话请求');
+       
+       try {
+         if (!this.sessionManager) {
+           throw new Error('Session manager not initialized');
+         }
+         
+         const refreshedSession = await this.sessionManager.manualRefresh();
+         
+         if (refreshedSession) {
+           const user = refreshedSession.user;
+           console.log('✅ 手动刷新成功');
+           
+           return {
+             success: true,
+             user: {
+               id: user.id,
+               login: user.login,
+               name: user.name,
+               email: user.email || user.primaryEmail,
+               avatar_url: user.avatar_url,
+               public_repos: user.public_repos,
+               followers: user.followers,
+               following: user.following
+             }
+           };
+         } else {
+           throw new Error('No active session to refresh');
+         }
+         
+       } catch (error) {
+         console.error('❌ 手动刷新失败:', error);
+         return {
+           success: false,
+           error: (error as Error).message
+         };
+       }
+     });
+
+     // 获取会话状态信息处理器
+     ipcMain.handle('oauth:get-session-status', async () => {
+       try {
+         if (!this.sessionManager) {
+           return {
+             isLoggedIn: false,
+             lastValidated: null,
+             timeSinceLastValidation: null,
+             isRefreshing: false,
+             retryCount: 0
+           };
+         }
+         
+         return this.sessionManager.getSessionStatus();
+         
+       } catch (error) {
+         console.error('❌ 获取会话状态失败:', error);
+         return {
+           isLoggedIn: false,
+           lastValidated: null,
+           timeSinceLastValidation: null,
+           isRefreshing: false,
+           retryCount: 0,
+           error: (error as Error).message
+         };
+       }
+     });
+   }
+
+  /**
+   * 清理应用资源
+   */
+  private cleanup(): void {
+    if (this.sessionManager) {
+      console.log('🧹 销毁会话管理器...');
+      this.sessionManager.destroy();
+      this.sessionManager = null;
+    }
+    
+    if (this.oauthManager) {
+      this.oauthManager = null;
+    }
+    
+    if (this.githubAPI) {
+      this.githubAPI = null;
+    }
   }
 
 private createMainWindow(): void {
@@ -206,6 +499,10 @@ private createMainWindow(): void {
     // 当窗口关闭时
     this.mainWindow.on('closed', () => {
       this.mainWindow = null;
+      
+      // 窗口关闭时不销毁会话管理器，保持会话持久性
+      // 只有应用完全退出时才销毁会话管理器
+      console.log('🚪 主窗口已关闭，会话管理器保持运行');
     });
   }
 
