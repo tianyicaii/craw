@@ -90,8 +90,8 @@ export class OAuthManager {
       });
 
       // 设置超时（5分钟）
-      setTimeout(() => {
-        this.stopCallbackServer();
+      setTimeout(async () => {
+        await this.stopCallbackServer();
         reject(new Error('授权超时'));
       }, 300000);
     });
@@ -123,7 +123,9 @@ export class OAuthManager {
       // 发送响应页面给浏览器
       if (error) {
         this.sendErrorPage(res, error, errorDescription || undefined);
-        this.stopCallbackServer();
+        setTimeout(() => {
+          this.stopCallbackServer();
+        }, 100);
         reject(new Error(`GitHub 授权错误: ${error}${errorDescription ? ` - ${errorDescription}` : ''}`));
         return;
       }
@@ -131,7 +133,9 @@ export class OAuthManager {
       // 验证 state 参数
       if (state !== expectedState) {
         this.sendErrorPage(res, 'invalid_state', 'State 参数不匹配');
-        this.stopCallbackServer();
+        setTimeout(() => {
+          this.stopCallbackServer();
+        }, 100);
         reject(new Error('State 参数不匹配，可能存在安全风险'));
         return;
       }
@@ -139,7 +143,9 @@ export class OAuthManager {
       // 检查授权码
       if (!code) {
         this.sendErrorPage(res, 'no_code', '未收到授权码');
-        this.stopCallbackServer();
+        setTimeout(() => {
+          this.stopCallbackServer();
+        }, 100);
         reject(new Error('未收到授权码'));
         return;
       }
@@ -148,7 +154,11 @@ export class OAuthManager {
 
       // 发送成功页面
       this.sendSuccessPage(res);
-      this.stopCallbackServer();
+      
+      // 延迟关闭服务器，确保响应发送完成
+      setTimeout(() => {
+        this.stopCallbackServer();
+      }, 100);
 
       // 返回成功结果
       resolve({
@@ -159,7 +169,9 @@ export class OAuthManager {
 
     } catch (error) {
       this.sendErrorPage(res, 'callback_error', (error as Error).message);
-      this.stopCallbackServer();
+      setTimeout(() => {
+        this.stopCallbackServer();
+      }, 100);
       reject(new Error(`处理回调失败: ${(error as Error).message}`));
     }
   }
@@ -309,13 +321,18 @@ export class OAuthManager {
   /**
    * 停止回调服务器
    */
-  private stopCallbackServer(): void {
-    if (this.server) {
-      this.server.close(() => {
-        console.log('🔴 回调服务器已关闭');
-      });
-      this.server = null;
-    }
+  private stopCallbackServer(): Promise<void> {
+    return new Promise((resolve) => {
+      if (this.server) {
+        this.server.close(() => {
+          console.log('🔴 回调服务器已关闭');
+          this.server = null;
+          resolve();
+        });
+      } else {
+        resolve();
+      }
+    });
   }
 
   /**
@@ -326,8 +343,16 @@ export class OAuthManager {
       try {
         // 如果已有进行中的授权，先取消
         if (this.authPromise) {
+          console.log('⚠️ 取消之前的授权请求');
           this.authPromise.reject(new Error('新的授权请求已开始'));
+          this.authPromise = null;
         }
+
+        // 确保服务器已关闭
+        await this.stopCallbackServer();
+        
+        // 等待一下确保端口释放
+        await new Promise(resolve => setTimeout(resolve, 100));
         
         this.authPromise = { resolve, reject };
 
@@ -360,11 +385,11 @@ export class OAuthManager {
   /**
    * 取消当前授权流程
    */
-  cancelAuth(): void {
+  async cancelAuth(): Promise<void> {
     if (this.authPromise) {
       this.authPromise.reject(new Error('授权已取消'));
       this.authPromise = null;
     }
-    this.stopCallbackServer();
+    await this.stopCallbackServer();
   }
 }

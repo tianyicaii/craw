@@ -169,7 +169,7 @@ class ElectronApp {
       
       try {
         if (this.oauthManager) {
-          this.oauthManager.cancelAuth();
+          await this.oauthManager.cancelAuth();
         }
         
         if (this.sessionManager) {

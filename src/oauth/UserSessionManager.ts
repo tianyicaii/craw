@@ -1,9 +1,51 @@
-import * as keytar from 'keytar';
+import * as fs from 'fs';
+import * as path from 'path';
+import { app } from 'electron';
 import { GitHubAPI, GitHubUser } from '../api/GitHubAPI';
 
-const SERVICE_NAME = 'ElectronOAuthApp';
 const TOKEN_KEY = 'github_access_token';
 const USER_KEY = 'github_user_data';
+
+// 简单的文件存储函数
+function getStoragePath(): string {
+  return path.join(app.getPath('userData'), 'session_data');
+}
+
+function ensureStorageDir(): void {
+  const storageDir = getStoragePath();
+  if (!fs.existsSync(storageDir)) {
+    fs.mkdirSync(storageDir, { recursive: true });
+  }
+}
+
+async function setStorageItem(key: string, value: string): Promise<void> {
+  ensureStorageDir();
+  const filePath = path.join(getStoragePath(), `${key}.json`);
+  fs.writeFileSync(filePath, value, 'utf8');
+}
+
+async function getStorageItem(key: string): Promise<string | null> {
+  try {
+    const filePath = path.join(getStoragePath(), `${key}.json`);
+    if (!fs.existsSync(filePath)) {
+      return null;
+    }
+    return fs.readFileSync(filePath, 'utf8');
+  } catch (error) {
+    return null;
+  }
+}
+
+async function deleteStorageItem(key: string): Promise<void> {
+  try {
+    const filePath = path.join(getStoragePath(), `${key}.json`);
+    if (fs.existsSync(filePath)) {
+      fs.unlinkSync(filePath);
+    }
+  } catch (error) {
+    // 忽略错误
+  }
+}
 
 // 自动刷新配置 - 适度的间隔时间
 const AUTO_REFRESH_INTERVAL = 30 * 60 * 1000; // 30分钟刷新一次用户信息
@@ -51,7 +93,7 @@ export class UserSessionManager {
       console.log('💾 保存用户会话...');
       
       // 存储访问令牌
-      await keytar.setPassword(SERVICE_NAME, TOKEN_KEY, session.token.access_token);
+      await setStorageItem(TOKEN_KEY, session.token.access_token);
       
       // 存储用户数据
       const sessionData = {
@@ -64,7 +106,7 @@ export class UserSessionManager {
         lastValidatedAt: session.lastValidatedAt
       };
       
-      await keytar.setPassword(SERVICE_NAME, USER_KEY, JSON.stringify(sessionData));
+      await setStorageItem(USER_KEY, JSON.stringify(sessionData));
       
       this.currentSession = session;
       console.log('✅ 用户会话保存成功');
@@ -85,16 +127,16 @@ export class UserSessionManager {
     try {
       console.log('🔍 加载用户会话...');
       
-      const accessToken = await keytar.getPassword(SERVICE_NAME, TOKEN_KEY);
+      const accessToken = await getStorageItem(TOKEN_KEY);
       if (!accessToken) {
         console.log('📭 未找到存储的访问令牌');
         return null;
       }
       
-      const sessionDataStr = await keytar.getPassword(SERVICE_NAME, USER_KEY);
+      const sessionDataStr = await getStorageItem(USER_KEY);
       if (!sessionDataStr) {
         console.log('📭 未找到存储的会话数据');
-        await keytar.deletePassword(SERVICE_NAME, TOKEN_KEY);
+        await deleteStorageItem(TOKEN_KEY);
         return null;
       }
       
@@ -265,7 +307,7 @@ export class UserSessionManager {
         lastValidatedAt: this.currentSession.lastValidatedAt
       };
       
-      await keytar.setPassword(SERVICE_NAME, USER_KEY, JSON.stringify(sessionData));
+      await setStorageItem(USER_KEY, JSON.stringify(sessionData));
     } catch (error) {
       console.error('❌ 更新会话数据失败:', error);
     }
@@ -280,8 +322,8 @@ export class UserSessionManager {
       
       this.stopAutoMaintenance();
       
-      await keytar.deletePassword(SERVICE_NAME, TOKEN_KEY);
-      await keytar.deletePassword(SERVICE_NAME, USER_KEY);
+      await deleteStorageItem(TOKEN_KEY);
+      await deleteStorageItem(USER_KEY);
       
       this.currentSession = null;
       console.log('✅ 用户会话清理完成');

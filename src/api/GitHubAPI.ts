@@ -1,6 +1,6 @@
 // src/api/GitHubAPI.ts
 
-import fetch from 'node-fetch';
+// 使用全局的 fetch API (Electron 25+ 支持)
 
 export interface TokenResponse {
   access_token: string;
